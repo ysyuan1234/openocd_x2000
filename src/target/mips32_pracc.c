@@ -101,10 +101,35 @@ static int wait_for_pracc_rw(struct mips_ejtag *ejtag_info, uint32_t *ctrl)
 	return ERROR_OK;
 }
 
+static int try_wait_for_pracc_rw(struct mips_ejtag *ejtag_info, uint32_t *ctrl)
+{
+	uint32_t ejtag_ctrl;
+
+	mips_ejtag_set_instr(ejtag_info, EJTAG_INST_CONTROL);
+	ejtag_ctrl = ejtag_info->ejtag_ctrl;
+	int retval = mips_ejtag_drscan_32(ejtag_info, &ejtag_ctrl);
+	if (retval != ERROR_OK) return retval;
+	*ctrl = ejtag_ctrl;
+	return ERROR_OK;
+}
+
 /* Shift in control and address for a new processor access, save them in ejtag_info */
 static int mips32_pracc_read_ctrl_addr(struct mips_ejtag *ejtag_info)
 {
 	int retval = wait_for_pracc_rw(ejtag_info, &ejtag_info->pa_ctrl);
+	if (retval != ERROR_OK)
+		return retval;
+
+	mips_ejtag_set_instr(ejtag_info, EJTAG_INST_ADDRESS);
+	ejtag_info->pa_addr = 0;
+	retval = mips_ejtag_drscan_32(ejtag_info, &ejtag_info->pa_addr);
+
+	return retval;
+}
+
+static int mips32_pracc_try_read_ctrl_addr(struct mips_ejtag *ejtag_info)
+{
+	int retval = try_wait_for_pracc_rw(ejtag_info, &ejtag_info->pa_ctrl);
 	if (retval != ERROR_OK)
 		return retval;
 
