@@ -73,16 +73,6 @@
 #include "mips32.h"
 #include "mips32_pracc.h"
 
-struct mips32_pracc_context {
-	uint32_t *local_oparam;
-	int num_oparam;
-	const uint32_t *code;
-	int code_len;
-	uint32_t stack[32];
-	int stack_offset;
-	struct mips_ejtag *ejtag_info;
-};
-
 static int wait_for_pracc_rw(struct mips_ejtag *ejtag_info, uint32_t *ctrl)
 {
 	uint32_t ejtag_ctrl;
