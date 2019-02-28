@@ -186,145 +186,120 @@ int mips32_pracc_clean_text_jump(struct mips_ejtag *ejtag_info)
 
 int mips32_pracc_exec(struct mips_ejtag *ejtag_info, struct pracc_queue_info *ctx, uint32_t *param_out)
 {
-	int code_count = 0;
-	int store_pending = 0;		/* increases with every store instruction at dmseg, decreases with every store pa */
-	uint32_t max_store_addr = 0;	/* for store pa address testing */
-	bool restart = 0;		/* restarting control */
-	int restart_count = 0;
+	int      code_count = 0;
+	uint32_t abandoned_count = 0;
+	int      store_pending = 0;     /* increases with every store instruction at dmseg, decreases with every store pa */
+	uint32_t max_store_addr = 0;    /* for store pa address testing */
 	uint32_t instr = 0;
-	bool final_check = 0;		/* set to 1 if in final checks after function code shifted out */
-	bool pass = 0;			/* to check the pass through pracc text after function code sent */
-	int retval;
+	bool     final_check = 0;       /* set to 1 if in final checks after function code shifted out */
+	int      index;
+	uint32_t data = 0;
+	uint32_t wait_dret_cnt = 0;
+	uint32_t lain = 4;
+	int      retval;
+
+	(void)mips32_pracc_read_ctrl_addr(ejtag_info);
+	if (ejtag_info->pa_addr != MIPS32_PRACC_TEXT) { /* restart */
+		retval = mips32_pracc_clean_text_jump(ejtag_info);
+		if (retval != ERROR_OK) return retval;
+	}
 
 	while (1) {
-		if (restart) {
-			if (restart_count < 3) {					/* max 3 restarts allowed */
-				retval = mips32_pracc_clean_text_jump(ejtag_info);
-				if (retval != ERROR_OK)
-					return retval;
-			} else
-				return ERROR_JTAG_DEVICE_ERROR;
-			restart_count++;
-			restart = 0;
-			code_count = 0;
-			LOG_DEBUG("restarting code");
-		}
-
-		retval = mips32_pracc_read_ctrl_addr(ejtag_info);		/* update current pa info: control and address */
-		if (retval != ERROR_OK)
-			return retval;
-
-		/* Check for read or write access */
-		if (ejtag_info->pa_ctrl & EJTAG_CTRL_PRNW) {						/* write/store access */
+		(void)mips32_pracc_read_ctrl_addr(ejtag_info); /* update current pa info: control and address */
+		if (ejtag_info->pa_ctrl & EJTAG_CTRL_PRNW) { /* write/store access */
 			/* Check for pending store from a previous store instruction at dmseg */
 			if (store_pending == 0) {
 				LOG_DEBUG("unexpected write at address %" PRIx32, ejtag_info->pa_addr);
-				if (code_count < 2) {	/* allow for restart */
-					restart = 1;
-					continue;
-				} else
+				return ERROR_JTAG_DEVICE_ERROR;
+			} else if (ejtag_info->pa_addr < MIPS32_PRACC_PARAM_OUT || ejtag_info->pa_addr > max_store_addr) {
+				LOG_DEBUG("writing at unexpected address %" PRIx32, ejtag_info->pa_addr);
+				return ERROR_JTAG_DEVICE_ERROR;
+			}
+			mips_ejtag_set_instr(ejtag_info, EJTAG_INST_DATA);
+			(void)mips_ejtag_drscan_32(ejtag_info, &data);
+			/* store data at param out, address based offset */
+			param_out[(ejtag_info->pa_addr - MIPS32_PRACC_PARAM_OUT) / lain] = data;
+			store_pending--;
+		} else { /* read/fetch access */
+			if ((code_count != 0) && (ejtag_info->pa_addr == MIPS32_PRACC_TEXT) && (final_check == 0)) {
+				final_check = 1;
+				code_count = 0;
+			}
+			if (!final_check) { /* executing function code */
+				index = (ejtag_info->pa_addr - MIPS32_PRACC_TEXT) / lain;
+				if ((code_count == 0) && (ejtag_info->pa_addr != MIPS32_PRACC_TEXT)) {
+					LOG_DEBUG("reading at unexpected address 0x%08x, expected %x", ejtag_info->pa_addr, MIPS32_PRACC_TEXT);
 					return ERROR_JTAG_DEVICE_ERROR;
-			} else {
-				/* check address */
-				if (ejtag_info->pa_addr < MIPS32_PRACC_PARAM_OUT || ejtag_info->pa_addr > max_store_addr) {
-
-					LOG_DEBUG("writing at unexpected address %" PRIx32, ejtag_info->pa_addr);
+				}
+				if (index < ctx->code_count) {
+					instr = ctx->pracc_list[index].instr;
+					/* check for store instruction at dmseg */
+					uint32_t store_addr = ctx->pracc_list[index].addr;
+					if (store_addr != 0) {
+						if (store_addr > max_store_addr)
+							max_store_addr = store_addr;
+						store_pending++;
+					}
+				} else {/*for fix IFU prefetch*/
+					instr = MIPS32_NOP;
+					abandoned_count++;
+				}
+				code_count++;
+				if (code_count > PRACC_MAX_EXEC_CODE_COUNT) {
+					LOG_DEBUG("max exec code count is %d", PRACC_MAX_EXEC_CODE_COUNT);
 					return ERROR_JTAG_DEVICE_ERROR;
+				}
+			} else {/* final check after function code shifted out */
+				if (store_pending == 0) {
+					if (ejtag_info->pa_addr != MIPS32_PRACC_TEXT) {
+						instr = MIPS32_B(NEG16(code_count + 1));
+						do {
+							mips_ejtag_set_instr(ejtag_info, EJTAG_INST_DATA);
+							mips_ejtag_drscan_32_out(ejtag_info, instr);
+							mips32_pracc_finish(ejtag_info);
+							instr = MIPS32_NOP;
+							(void)mips32_pracc_read_ctrl_addr(ejtag_info);
+						} while(ejtag_info->pa_addr != MIPS32_PRACC_TEXT);
+					}
+					return ERROR_OK;
+				} else { // for fix LSU store delay
+					instr = MIPS32_NOP;
+					abandoned_count++;
+					code_count++;
 				}
 			}
-			/* read data */
-			uint32_t data = 0;
-			mips_ejtag_set_instr(ejtag_info, EJTAG_INST_DATA);
-			retval = mips_ejtag_drscan_32(ejtag_info, &data);
-			if (retval != ERROR_OK)
-				return retval;
-
-			/* store data at param out, address based offset */
-			param_out[(ejtag_info->pa_addr - MIPS32_PRACC_PARAM_OUT) / 4] = data;
-			store_pending--;
-
-		} else {					/* read/fetch access */
-			 if (!final_check) {			/* executing function code */
-				/* check address */
-				if (ejtag_info->pa_addr != (MIPS32_PRACC_TEXT + code_count * 4)) {
-					LOG_DEBUG("reading at unexpected address %" PRIx32 ", expected %x",
-							ejtag_info->pa_addr, MIPS32_PRACC_TEXT + code_count * 4);
-
-					/* restart code execution only in some cases */
-					if (code_count == 1 && ejtag_info->pa_addr == MIPS32_PRACC_TEXT && restart_count == 0) {
-						LOG_DEBUG("restarting, without clean jump");
-						restart_count++;
-						code_count = 0;
-						continue;
-					} else if (code_count < 2) {
-						restart = 1;
-						continue;
-					}
-
-					return ERROR_JTAG_DEVICE_ERROR;
-				}
-				/* check for store instruction at dmseg */
-				uint32_t store_addr = ctx->pracc_list[ctx->max_code + code_count];
-				if (store_addr != 0) {
-					if (store_addr > max_store_addr)
-						max_store_addr = store_addr;
-					store_pending++;
-				}
-
-				instr = ctx->pracc_list[code_count++];
-				if (code_count == ctx->code_count)	/* last instruction, start final check */
-					final_check = 1;
-
-			 } else {	/* final check after function code shifted out */
-					/* check address */
-				if (ejtag_info->pa_addr == MIPS32_PRACC_TEXT) {
-					if (!pass) {	/* first pass through pracc text */
-						if (store_pending == 0)		/* done, normal exit */
-							return ERROR_OK;
-						pass = 1;		/* pracc text passed */
-						code_count = 0;		/* restart code count */
-					} else {
-						LOG_DEBUG("unexpected second pass through pracc text");
-						return ERROR_JTAG_DEVICE_ERROR;
-					}
-				} else {
-					if (ejtag_info->pa_addr != (MIPS32_PRACC_TEXT + code_count * 4)) {
-						LOG_DEBUG("unexpected read address in final check: %" PRIx32 ", expected: %x",
-							  ejtag_info->pa_addr, MIPS32_PRACC_TEXT + code_count * 4);
-						return ERROR_JTAG_DEVICE_ERROR;
-					}
-				}
-				if (!pass) {
-					if ((code_count - ctx->code_count) > 1) {	 /* allow max 2 instruction delay slot */
-						LOG_DEBUG("failed to jump back to pracc text");
-						return ERROR_JTAG_DEVICE_ERROR;
-					}
-				} else
-					if (code_count > 10) {		/* enough, abandone */
-						LOG_DEBUG("execution abandoned, store pending: %d", store_pending);
-						return ERROR_JTAG_DEVICE_ERROR;
-					}
-				instr = MIPS32_NOP;	/* shift out NOPs instructions */
-				code_count++;
-			 }
-
+			if (abandoned_count > 256) {
+                        	LOG_DEBUG("execution abandoned, store pending: %d", store_pending);
+                		return ERROR_JTAG_DEVICE_ERROR;
+                	}
 			/* Send instruction out */
 			mips_ejtag_set_instr(ejtag_info, EJTAG_INST_DATA);
 			mips_ejtag_drscan_32_out(ejtag_info, instr);
 		}
 		/* finish processor access, let the processor eat! */
-		retval = mips32_pracc_finish(ejtag_info);
-		if (retval != ERROR_OK)
-			return retval;
+		mips32_pracc_finish(ejtag_info);
 
-		if (instr == MIPS32_DRET)	/* after leaving debug mode nothing to do */
-			return ERROR_OK;
-
-		if (store_pending == 0 && pass) {	/* store access done, but after passing pracc text */
-			LOG_DEBUG("warning: store access pass pracc text");
-			return ERROR_OK;
+		if (instr == MIPS32_DRET) {/* after leaving debug mode and make sure the DRET finish */
+			while(1) {
+				(void)mips32_pracc_try_read_ctrl_addr(ejtag_info);/* update current pa info: control and address */
+				if (((ejtag_info->pa_ctrl & EJTAG_CTRL_BRKST) == 0) ||
+            		            ((ejtag_info->pa_ctrl & EJTAG_CTRL_PRACC) && (ejtag_info->pa_addr == MIPS32_PRACC_TEXT))) {
+					return ERROR_OK;
+				} else if ((ejtag_info->pa_addr != MIPS32_PRACC_TEXT) && (ejtag_info->pa_ctrl & EJTAG_CTRL_PRACC)) {
+            		        	mips_ejtag_set_instr(ejtag_info, EJTAG_INST_DATA);
+            		        	mips_ejtag_drscan_32_out(ejtag_info, MIPS32_NOP);
+            		        	mips32_pracc_finish(ejtag_info);
+				}
+				wait_dret_cnt++;
+				if (wait_dret_cnt > 64) {
+					LOG_DEBUG("mips32_pracc_finish failed");
+					return ERROR_FAIL;
+				}
+			}
 		}
 	}
+
+	return ERROR_FAIL;
 }
 
 inline void pracc_queue_init(struct pracc_queue_info *ctx)
@@ -333,7 +308,7 @@ inline void pracc_queue_init(struct pracc_queue_info *ctx)
 	ctx->code_count = 0;
 	ctx->store_count = 0;
 
-	ctx->pracc_list = malloc(2 * ctx->max_code * sizeof(uint32_t));
+	ctx->pracc_list = malloc(ctx->max_code * sizeof(pa_list));
 	if (ctx->pracc_list == NULL) {
 		LOG_ERROR("Out of memory");
 		ctx->retval = ERROR_FAIL;
@@ -342,8 +317,8 @@ inline void pracc_queue_init(struct pracc_queue_info *ctx)
 
 inline void pracc_add(struct pracc_queue_info *ctx, uint32_t addr, uint32_t instr)
 {
-	ctx->pracc_list[ctx->max_code + ctx->code_count] = addr;
-	ctx->pracc_list[ctx->code_count++] = instr;
+	ctx->pracc_list[ctx->code_count].instr = instr;
+	ctx->pracc_list[ctx->code_count++].addr = addr;
 	if (addr)
 		ctx->store_count++;
 }
@@ -383,15 +358,14 @@ int mips32_pracc_queue_exec(struct mips_ejtag *ejtag_info, struct pracc_queue_in
 
 	int scan_count = 0;
 	for (int i = 0; i != 2 * ctx->code_count; i++) {
-		uint32_t data = 0;
-		if (i & 1u) {			/* Check store address from previous instruction, if not the first */
-			if (i < 2 || 0 == ctx->pracc_list[ctx->max_code + (i / 2) - 1])
-				continue;
-		} else
-			data = ctx->pracc_list[i / 2];
-
 		jtag_add_clocks(num_clocks);
-		mips_ejtag_add_scan_96(ejtag_info, ejtag_ctrl, data, scan_in[scan_count++].scan_96);
+		mips_ejtag_add_scan_96(ejtag_info, ejtag_ctrl, ctx->pracc_list[i].instr, scan_in[scan_count++].scan_96);
+
+		/* Check store address from previous instruction, if not the first */
+		if (i > 0 && ctx->pracc_list[i - 1].addr) {
+			jtag_add_clocks(num_clocks);
+			mips_ejtag_add_scan_96(ejtag_info, ejtag_ctrl, 0, scan_in[scan_count++].scan_96);
+		}
 	}
 
 	int retval = jtag_execute_queue();		/* execute queued scans */
@@ -400,24 +374,35 @@ int mips32_pracc_queue_exec(struct mips_ejtag *ejtag_info, struct pracc_queue_in
 
 	uint32_t fetch_addr = MIPS32_PRACC_TEXT;		/* start address */
 	scan_count = 0;
-	for (int i = 0; i != 2 * ctx->code_count; i++) {				/* verify every pracc access */
-		uint32_t store_addr = 0;
-		if (i & 1u) {			/* Read store addres from previous instruction, if not the first */
-			store_addr = ctx->pracc_list[ctx->max_code + (i / 2) - 1];
-			if (i < 2 || 0 == store_addr)
-				continue;
-		}
-
+	for (int i = 0; i != ctx->code_count; i++) {				/* verify every pracc access */
+		/* check pracc bit */
 		ejtag_ctrl = buf_get_u32(scan_in[scan_count].scan_32.ctrl, 0, 32);
+		uint32_t addr = buf_get_u32(scan_in[scan_count].scan_32.addr, 0, 32);
 		if (!(ejtag_ctrl & EJTAG_CTRL_PRACC)) {
 			LOG_ERROR("Error: access not pending  count: %d", scan_count);
 			retval = ERROR_FAIL;
 			goto exit;
 		}
+		if (ejtag_ctrl & EJTAG_CTRL_PRNW) {
+			LOG_ERROR("Not a fetch/read access, count: %d", scan_count);
+			retval = ERROR_FAIL;
+			goto exit;
+		}
+		if (addr != fetch_addr) {
+			LOG_ERROR("Fetch addr mismatch, read: %" PRIx32 " expected: %" PRIx32 " count: %d",
+					  addr, fetch_addr, scan_count);
+			retval = ERROR_FAIL;
+			goto exit;
+		}
+		fetch_addr += 4;
+		scan_count++;
 
-		uint32_t addr = buf_get_u32(scan_in[scan_count].scan_32.addr, 0, 32);
+		/* check if previous intrucction is a store instruction at dmesg */
+		if (i > 0 && ctx->pracc_list[i - 1].addr) {
+			uint32_t store_addr = ctx->pracc_list[i - 1].addr;
+			ejtag_ctrl = buf_get_u32(scan_in[scan_count].scan_32.ctrl, 0, 32);
+			addr = buf_get_u32(scan_in[scan_count].scan_32.addr, 0, 32);
 
-		if (store_addr != 0) {
 			if (!(ejtag_ctrl & EJTAG_CTRL_PRNW)) {
 				LOG_ERROR("Not a store/write access, count: %d", scan_count);
 				retval = ERROR_FAIL;
@@ -425,28 +410,14 @@ int mips32_pracc_queue_exec(struct mips_ejtag *ejtag_info, struct pracc_queue_in
 			}
 			if (addr != store_addr) {
 				LOG_ERROR("Store address mismatch, read: %" PRIx32 " expected: %" PRIx32 " count: %d",
-						addr, store_addr, scan_count);
+							      addr, store_addr, scan_count);
 				retval = ERROR_FAIL;
 				goto exit;
 			}
 			int buf_index = (addr - MIPS32_PRACC_PARAM_OUT) / 4;
 			buf[buf_index] = buf_get_u32(scan_in[scan_count].scan_32.data, 0, 32);
-
-		} else {
-			if (ejtag_ctrl & EJTAG_CTRL_PRNW) {
-				LOG_ERROR("Not a fetch/read access, count: %d", scan_count);
-				retval = ERROR_FAIL;
-				goto exit;
-			}
-			if (addr != fetch_addr) {
-				LOG_ERROR("Fetch addr mismatch, read: %" PRIx32 " expected: %" PRIx32 " count: %d",
-					  addr, fetch_addr, scan_count);
-				retval = ERROR_FAIL;
-				goto exit;
-			}
-			fetch_addr += 4;
+			scan_count++;
 		}
-		scan_count++;
 	}
 exit:
 	free(scan_in);

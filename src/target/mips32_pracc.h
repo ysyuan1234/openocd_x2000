@@ -42,12 +42,21 @@
 #define NEG16(v)						(((~(v)) + 1) & 0xFFFF)
 /*#define NEG18(v) (((~(v)) + 1) & 0x3FFFF)*/
 
+
+#define PRACC_BLOCK				128	/* 1 Kbyte */
+#define PRACC_MAX_EXEC_CODE_COUNT		0x0FFFFFFF
+
+typedef struct {
+	uint32_t instr;
+	uint32_t addr;
+} pa_list;
+
 struct pracc_queue_info {
 	int retval;
 	const int max_code;
 	int code_count;
 	int store_count;
-	uint32_t *pracc_list;	/* Code and store addresses */
+	pa_list *pracc_list;	/* Code and store addresses */
 };
 void pracc_queue_init(struct pracc_queue_info *ctx);
 void pracc_add(struct pracc_queue_info *ctx, uint32_t addr, uint32_t instr);
