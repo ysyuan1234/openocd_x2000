@@ -151,6 +151,35 @@ int mips_ejtag_drscan_32(struct mips_ejtag *ejtag_info, uint32_t *data)
 	return ERROR_OK;
 }
 
+void mips_ejtag_drscan_32_queued(struct mips_ejtag *ejtag_info, uint32_t data_out, uint8_t *data_in)
+{
+	assert(ejtag_info->tap != NULL);
+	struct jtag_tap *tap = ejtag_info->tap;
+
+	struct scan_field field;
+	field.num_bits = 32;
+
+	uint8_t scan_out[4];
+	field.out_value = scan_out;
+	buf_set_u32(scan_out, 0, field.num_bits, data_out);
+
+	field.in_value = data_in;
+	jtag_add_dr_scan(tap, 1, &field, TAP_IDLE);
+
+	keep_alive();
+}
+
+void mips_ejtag_add_drscan_32(struct mips_ejtag *ejtag_info, uint32_t data_out, uint32_t *data_in)
+{
+	uint8_t scan_in[4];
+	if (data_in == NULL)
+		mips_ejtag_drscan_32_queued(ejtag_info, data_out, NULL);
+	else {
+		mips_ejtag_drscan_32_queued(ejtag_info, data_out, scan_in);
+		*data_in = buf_get_u32(scan_in, 0, 32);
+	}
+}
+
 void mips_ejtag_drscan_32_out(struct mips_ejtag *ejtag_info, uint32_t data)
 {
 	uint8_t t[4];

@@ -337,4 +337,13 @@ typedef uint64_t uintmax_t;
 
 #endif
 
+typedef uint32_t target_addr_t;
+#define TARGET_ADDR_MAX UINT32_MAX
+#define TARGET_PRIdADDR PRId32
+#define TARGET_PRIuADDR PRIu32
+#define TARGET_PRIoADDR PRIo32
+#define TARGET_PRIxADDR PRIx32
+#define TARGET_PRIXADDR PRIX32
+#define TARGET_ADDR_FMT "0x%8.8" TARGET_PRIxADDR
+
 #endif /* OPENOCD_HELPER_TYPES_H */
