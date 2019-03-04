@@ -1040,6 +1040,25 @@ static bool jtag_examine_chain_match_tap(const struct jtag_tap *tap)
  */
 static int jtag_examine_chain(void)
 {
+	struct scan_field field;
+    uint8_t in_buf[4]={0};
+    uint8_t out_buf[4]={0};
+
+    out_buf[0] = 0x9f;
+    out_buf[1] = 0x02;
+	field.num_bits = 10;
+	field.out_value = out_buf;
+	field.in_value = in_buf;
+	jtag_add_plain_ir_scan(field.num_bits, field.out_value, field.in_value, TAP_IDLE);
+    jtag_execute_queue();
+
+    out_buf[0] = 0x01;
+	field.num_bits = 5;
+	field.out_value = out_buf;
+	field.in_value = in_buf;
+	jtag_add_plain_ir_scan(field.num_bits, field.out_value, field.in_value, TAP_IDLE);
+    jtag_execute_queue();
+
 	int retval;
 	unsigned max_taps = jtag_tap_count();
 
